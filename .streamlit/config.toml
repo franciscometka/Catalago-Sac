@@ -1,0 +1,8 @@
+# Trava o app em tema claro (evita texto branco sobre fundo claro).
+[theme]
+base = "light"
+primaryColor = "#3B82F6"
+backgroundColor = "#F7F8FA"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1A1D23"
+font = "sans serif"
