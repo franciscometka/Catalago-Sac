@@ -4,7 +4,9 @@ Design: dashboard claro (fonte Manrope), sidebar customizada, topbar com busca,
 hero com gradiente azul, stat cards e cards de produto.
 """
 
+import base64
 import html
+import io
 import os
 import re
 import sqlite3
@@ -119,6 +121,7 @@ def init_schema():
                 sku TEXT UNIQUE,
                 video_url TEXT,
                 manual_texto TEXT,
+                foto BLOB,
                 criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """,
@@ -135,6 +138,11 @@ def init_schema():
             """,
             fetch=False,
         )
+        try:
+            run_query("ALTER TABLE produtos ADD COLUMN foto BLOB;", fetch=False)
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                raise
         return
 
     run_query(
@@ -145,6 +153,7 @@ def init_schema():
             sku TEXT UNIQUE,
             video_url TEXT,
             manual_texto TEXT,
+            foto BYTEA,
             criado_em TIMESTAMP DEFAULT NOW()
         );
         """,
@@ -161,6 +170,40 @@ def init_schema():
         """,
         fetch=False,
     )
+    run_query("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS foto BYTEA;", fetch=False)
+
+
+def processar_foto(uploaded_file, max_dim=800, quality=82):
+    """Redimensiona e comprime a imagem enviada antes de guardar no banco.
+    Mantém o arquivo leve (Postgres free tier tem 500MB de limite)."""
+    if uploaded_file is None:
+        return None
+    data = uploaded_file.getvalue()
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data))
+        img = img.convert("RGB")
+        img.thumbnail((max_dim, max_dim))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+    except Exception:
+        return data  # Pillow indisponível ou formato inesperado: guarda como veio.
+
+
+def foto_bytes(valor):
+    """Normaliza o valor lido do banco (bytes, memoryview ou None) para bytes."""
+    if valor is None:
+        return None
+    return bytes(valor)
+
+
+def foto_data_uri(valor):
+    b = foto_bytes(valor)
+    if not b:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(b).decode()
 
 
 def erro_sku_duplicado(exc):
@@ -180,7 +223,7 @@ def buscar_produtos(termo=""):
         like = f"%{termo}%"
         return run_query(
             """
-            SELECT id, nome, sku, video_url, manual_texto, criado_em
+            SELECT id, nome, sku, video_url, manual_texto, foto, criado_em
             FROM produtos
             WHERE nome ILIKE %s OR sku ILIKE %s
             ORDER BY nome
@@ -189,7 +232,7 @@ def buscar_produtos(termo=""):
         )
     return run_query(
         """
-        SELECT id, nome, sku, video_url, manual_texto, criado_em
+        SELECT id, nome, sku, video_url, manual_texto, foto, criado_em
         FROM produtos
         ORDER BY nome
         """
@@ -217,13 +260,13 @@ def get_stats():
     return row[0] if row else {"produtos": 0, "videos": 0, "faqs": 0}
 
 
-def inserir_produto(nome, sku, video_url, manual_texto):
+def inserir_produto(nome, sku, video_url, manual_texto, foto=None):
     run_query(
         """
-        INSERT INTO produtos (nome, sku, video_url, manual_texto)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO produtos (nome, sku, video_url, manual_texto, foto)
+        VALUES (%s, %s, %s, %s, %s)
         """,
-        (nome, sku or None, video_url or None, manual_texto or None),
+        (nome, sku or None, video_url or None, manual_texto or None, foto),
         fetch=False,
     )
 
@@ -236,14 +279,14 @@ def inserir_faq(produto_id, pergunta, resposta):
     )
 
 
-def atualizar_produto(pid, nome, sku, video_url, manual_texto):
+def atualizar_produto(pid, nome, sku, video_url, manual_texto, foto=None):
     run_query(
         """
         UPDATE produtos
-        SET nome = %s, sku = %s, video_url = %s, manual_texto = %s
+        SET nome = %s, sku = %s, video_url = %s, manual_texto = %s, foto = %s
         WHERE id = %s
         """,
-        (nome, sku or None, video_url or None, manual_texto or None, pid),
+        (nome, sku or None, video_url or None, manual_texto or None, foto, pid),
         fetch=False,
     )
 
@@ -635,6 +678,11 @@ def render_detalhe(det):
         _render_edicao(det)
         return
 
+    foto = foto_bytes(det.get("foto"))
+    if foto:
+        st.markdown("<div class='detail-label'>Foto do produto</div>", unsafe_allow_html=True)
+        st.image(foto, width=320)
+
     video_url = det.get("video_url")
     if video_url:
         st.markdown("<div class='detail-label'>Vídeo do produto</div>", unsafe_allow_html=True)
@@ -668,7 +716,14 @@ def _render_edicao(det):
 
     # ---- Dados do produto ----
     st.markdown("<div class='detail-label'>Editar produto</div>", unsafe_allow_html=True)
+    foto_atual = foto_bytes(det.get("foto"))
     with st.form(f"edit_prod_{pid or 'demo'}"):
+        if foto_atual:
+            st.image(foto_atual, width=160, caption="Foto atual")
+        nova_foto = st.file_uploader(
+            "Trocar foto do produto", type=["png", "jpg", "jpeg", "webp"],
+            key=f"foto_{pid or 'demo'}",
+        )
         nome = st.text_input("Nome", value=det.get("nome") or "")
         sku = st.text_input("SKU", value=det.get("sku_raw") or "")
         video_url = st.text_input("Link do vídeo (YouTube)", value=det.get("video_url") or "")
@@ -680,7 +735,10 @@ def _render_edicao(det):
                 st.info("Prévia — conecte o banco para salvar.")
             else:
                 try:
-                    atualizar_produto(pid, nome.strip(), sku.strip(), video_url.strip(), descricao.strip())
+                    foto_final = processar_foto(nova_foto) if nova_foto else foto_atual
+                    atualizar_produto(
+                        pid, nome.strip(), sku.strip(), video_url.strip(), descricao.strip(), foto_final
+                    )
                     st.success("Produto atualizado.")
                     st.session_state.edit_mode = False
                     st.rerun()
@@ -809,9 +867,10 @@ SAMPLE_PRODUCTS = [
 def produto_display(prod):
     """Mapeia um produto real do banco para os campos visuais do card."""
     manual = (prod.get("manual_texto") or "").strip()
+    foto = foto_data_uri(prod.get("foto")) or youtube_thumbnail(prod.get("video_url"))
     return {
         "href": f"?produto={prod['id']}",
-        "photo": youtube_thumbnail(prod.get("video_url")),
+        "photo": foto,
         "category": prod.get("sku") or "Catálogo",
         "name": prod.get("nome") or "",
         "desc": manual[:110] if manual else "Consulte vídeo e FAQ nos detalhes.",
@@ -979,6 +1038,7 @@ def page_produtos(termo):
                     "sku_raw": prod.get("sku") or "",
                     "video_url": prod.get("video_url"),
                     "descricao": prod.get("manual_texto"),
+                    "foto": prod.get("foto"),
                     "faqs": buscar_faq(prod["id"]),
                 })
                 return
@@ -1016,6 +1076,7 @@ def page_produtos(termo):
 def _render_cadastro():
     with st.expander("Novo produto", expanded=True):
         with st.form("form_produto", clear_on_submit=True):
+            foto_upload = st.file_uploader("Foto do produto", type=["png", "jpg", "jpeg", "webp"])
             nome = st.text_input("Nome *")
             sku = st.text_input("SKU")
             video_url = st.text_input("Link do vídeo (YouTube)")
@@ -1025,7 +1086,10 @@ def _render_cadastro():
                     st.warning("O nome é obrigatório.")
                 else:
                     try:
-                        inserir_produto(nome.strip(), sku.strip(), video_url.strip(), manual_texto.strip())
+                        inserir_produto(
+                            nome.strip(), sku.strip(), video_url.strip(), manual_texto.strip(),
+                            processar_foto(foto_upload),
+                        )
                         st.success(f"Produto “{nome.strip()}” cadastrado.")
                     except Exception as e:
                         if erro_sku_duplicado(e):

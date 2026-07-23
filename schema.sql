@@ -7,6 +7,7 @@ CREATE TABLE produtos (
     sku TEXT UNIQUE,
     video_url TEXT,
     manual_texto TEXT,
+    foto BYTEA,
     criado_em TIMESTAMP DEFAULT NOW()
 );
 

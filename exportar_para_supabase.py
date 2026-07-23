@@ -26,6 +26,13 @@ def esc(valor):
     return "'" + str(valor).replace("'", "''") + "'"
 
 
+def esc_bytes(valor):
+    """Literal bytea do Postgres a partir de bytes (formato hex '\\x...')."""
+    if valor is None:
+        return "NULL"
+    return "'\\x" + bytes(valor).hex() + "'::bytea"
+
+
 def main():
     if not os.path.exists(DB):
         print("catalogo.db não encontrado — cadastre produtos no app primeiro.")
@@ -34,7 +41,7 @@ def main():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     produtos = conn.execute(
-        "SELECT id, nome, sku, video_url, manual_texto FROM produtos ORDER BY id"
+        "SELECT id, nome, sku, video_url, manual_texto, foto FROM produtos ORDER BY id"
     ).fetchall()
     faqs = conn.execute(
         "SELECT produto_id, pergunta, resposta FROM faq_produto ORDER BY id"
@@ -50,9 +57,9 @@ def main():
 
     for p in produtos:
         linhas.append(
-            "INSERT INTO produtos (id, nome, sku, video_url, manual_texto) VALUES "
+            "INSERT INTO produtos (id, nome, sku, video_url, manual_texto, foto) VALUES "
             f"({p['id']}, {esc(p['nome'])}, {esc(p['sku'])}, "
-            f"{esc(p['video_url'])}, {esc(p['manual_texto'])});"
+            f"{esc(p['video_url'])}, {esc(p['manual_texto'])}, {esc_bytes(p['foto'])});"
         )
 
     linhas.append("")
