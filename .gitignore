@@ -2,3 +2,7 @@
 venv/
 __pycache__/
 .streamlit/secrets.toml
+
+# Banco local de desenvolvimento e seed gerado para o Supabase
+catalogo.db
+seed.sql

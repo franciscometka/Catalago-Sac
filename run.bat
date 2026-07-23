@@ -25,11 +25,11 @@ if not exist "venv\" (
 
 if not exist ".streamlit\secrets.toml" (
     echo.
-    echo [ATENCAO] Arquivo .streamlit\secrets.toml nao encontrado.
-    echo Copie .streamlit\secrets.toml.example para .streamlit\secrets.toml
-    echo e preencha a connection string do Supabase antes de usar o app.
+    echo [INFO] Rodando em modo LOCAL, salvando em catalogo.db.
+    echo Nada a configurar. Para usar o Supabase depois, copie
+    echo .streamlit\secrets.toml.example para .streamlit\secrets.toml
+    echo e preencha a connection string.
     echo.
-    pause
 )
 
 echo Iniciando o Catalogo SAC...

@@ -5,11 +5,11 @@ hero com gradiente azul, stat cards e cards de produto.
 """
 
 import html
+import os
 import re
+import sqlite3
 from urllib.parse import urlparse, parse_qs
 
-import psycopg2
-from psycopg2.pool import SimpleConnectionPool
 import streamlit as st
 
 # --------------------------------------------------------------------------- #
@@ -22,19 +22,73 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Banco local usado enquanto o Supabase não está configurado.
+SQLITE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalogo.db")
+
 
 # --------------------------------------------------------------------------- #
-# Conexão com o banco (padrão trayo-app: pool via @st.cache_resource)
+# Conexão com o banco — dois modos, detectados automaticamente:
+#   • Postgres/Supabase → se houver [connections].database_url em secrets.toml
+#   • SQLite local      → caso contrário (arquivo catalogo.db, sem configuração)
+#
+# As queries são escritas no dialeto Postgres (placeholder %s, ILIKE, btrim).
+# Em modo SQLite elas são traduzidas em run_query, então o mesmo código sobe
+# para o Supabase sem nenhuma alteração.
 # --------------------------------------------------------------------------- #
+def _database_url():
+    try:
+        url = st.secrets["connections"]["database_url"]
+    except Exception:
+        return None
+    # Ignora o placeholder do secrets.toml.example, se alguém copiar sem editar.
+    if not url or "SEU_PROJETO" in url or "SUA_SENHA" in url:
+        return None
+    return url
+
+
+def db_mode():
+    return "postgres" if _database_url() else "sqlite"
+
+
 @st.cache_resource
 def get_pool():
-    """Cria um pool de conexões reutilizável durante toda a sessão do app."""
-    database_url = st.secrets["connections"]["database_url"]
-    return SimpleConnectionPool(minconn=1, maxconn=5, dsn=database_url)
+    """Pool de conexões (Postgres) ou conexão única em arquivo (SQLite)."""
+    database_url = _database_url()
+    if database_url:
+        from psycopg2.pool import SimpleConnectionPool  # só quando há Supabase
+
+        return SimpleConnectionPool(minconn=1, maxconn=5, dsn=database_url)
+
+    conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+
+def _to_sqlite(sql):
+    """Traduz o SQL escrito no dialeto Postgres para o do SQLite."""
+    sql = sql.replace("%s", "?")
+    sql = re.sub(r"\bILIKE\b", "LIKE", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bbtrim\s*\(", "trim(", sql, flags=re.IGNORECASE)
+    return sql
 
 
 def run_query(sql, params=None, fetch=True):
-    """Executa uma query usando uma conexão do pool. Placeholder = %s."""
+    """Executa uma query nos dois modos. Placeholder = %s. Retorna lista de dicts."""
+    if db_mode() == "sqlite":
+        conn = get_pool()
+        cur = conn.cursor()
+        try:
+            cur.execute(_to_sqlite(sql), params or ())
+            rows = [dict(r) for r in cur.fetchall()] if fetch else None
+            conn.commit()
+            return rows
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+
     pool = get_pool()
     conn = pool.getconn()
     try:
@@ -52,6 +106,69 @@ def run_query(sql, params=None, fetch=True):
         raise
     finally:
         pool.putconn(conn)
+
+
+def init_schema():
+    """Cria as tabelas se ainda não existirem. Idempotente nos dois bancos."""
+    if db_mode() == "sqlite":
+        run_query(
+            """
+            CREATE TABLE IF NOT EXISTS produtos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT NOT NULL,
+                sku TEXT UNIQUE,
+                video_url TEXT,
+                manual_texto TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            fetch=False,
+        )
+        run_query(
+            """
+            CREATE TABLE IF NOT EXISTS faq_produto (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                produto_id INTEGER REFERENCES produtos(id) ON DELETE CASCADE,
+                pergunta TEXT NOT NULL,
+                resposta TEXT NOT NULL
+            );
+            """,
+            fetch=False,
+        )
+        return
+
+    run_query(
+        """
+        CREATE TABLE IF NOT EXISTS produtos (
+            id SERIAL PRIMARY KEY,
+            nome TEXT NOT NULL,
+            sku TEXT UNIQUE,
+            video_url TEXT,
+            manual_texto TEXT,
+            criado_em TIMESTAMP DEFAULT NOW()
+        );
+        """,
+        fetch=False,
+    )
+    run_query(
+        """
+        CREATE TABLE IF NOT EXISTS faq_produto (
+            id SERIAL PRIMARY KEY,
+            produto_id INTEGER REFERENCES produtos(id) ON DELETE CASCADE,
+            pergunta TEXT NOT NULL,
+            resposta TEXT NOT NULL
+        );
+        """,
+        fetch=False,
+    )
+
+
+def erro_sku_duplicado(exc):
+    """True se a exceção for violação de UNIQUE no SKU (SQLite ou Postgres)."""
+    if exc.__class__.__name__ in ("IntegrityError", "UniqueViolation"):
+        msg = str(exc).lower()
+        return "sku" in msg or "unique" in msg
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -245,6 +362,9 @@ def inject_css():
         .sb-help .h { font-weight:700; font-size:13px; color:var(--ink); }
         .sb-help .p { font-weight:400; font-size:12px; line-height:1.5; color:var(--muted); }
         .sb-help a { font-weight:600; font-size:13px; color:var(--blue); margin-top:2px; }
+        .sb-db { font-size:11px; font-weight:600; padding:10px 10px 0 10px; }
+        .sb-db-local { color:#b45309; }
+        .sb-db-remote { color:#15803d; }
 
         /* Botões de navegação (sidebar) */
         section[data-testid="stSidebar"] .stButton > button {
@@ -436,6 +556,18 @@ def sidebar_nav():
             unsafe_allow_html=True,
         )
 
+        # Indicador de onde os dados estão sendo salvos.
+        if db_mode() == "sqlite":
+            st.markdown(
+                "<div class='sb-db sb-db-local'>● Banco local (catalogo.db)</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div class='sb-db sb-db-remote'>● Supabase conectado</div>",
+                unsafe_allow_html=True,
+            )
+
 
 # --------------------------------------------------------------------------- #
 # Topbar (busca + sino + avatar)
@@ -552,10 +684,11 @@ def _render_edicao(det):
                     st.success("Produto atualizado.")
                     st.session_state.edit_mode = False
                     st.rerun()
-                except psycopg2.errors.UniqueViolation:
-                    st.error("Já existe um produto com esse SKU.")
                 except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
+                    if erro_sku_duplicado(e):
+                        st.error("Já existe um produto com esse SKU.")
+                    else:
+                        st.error(f"Erro ao salvar: {e}")
 
     # ---- Perguntas do FAQ ----
     st.markdown("<div class='detail-label'>Perguntas do FAQ</div>", unsafe_allow_html=True)
@@ -894,10 +1027,11 @@ def _render_cadastro():
                     try:
                         inserir_produto(nome.strip(), sku.strip(), video_url.strip(), manual_texto.strip())
                         st.success(f"Produto “{nome.strip()}” cadastrado.")
-                    except psycopg2.errors.UniqueViolation:
-                        st.error("Já existe um produto com esse SKU.")
                     except Exception as e:
-                        st.error(f"Erro ao salvar: {e}")
+                        if erro_sku_duplicado(e):
+                            st.error("Já existe um produto com esse SKU.")
+                        else:
+                            st.error(f"Erro ao salvar: {e}")
 
     with st.expander("Adicionar pergunta/resposta a um produto"):
         try:
@@ -976,6 +1110,10 @@ def _handle_query_params():
 
 def main():
     inject_css()
+    try:
+        init_schema()
+    except Exception as e:
+        st.error(f"Não foi possível preparar o banco de dados: {e}")
     _handle_query_params()
     sidebar_nav()
     termo = topbar()
