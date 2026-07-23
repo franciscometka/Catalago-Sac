@@ -173,7 +173,7 @@ def init_schema():
     run_query("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS foto BYTEA;", fetch=False)
 
 
-def processar_foto(uploaded_file, max_dim=800, quality=82):
+def processar_foto(uploaded_file, max_dim=1000, quality=85):
     """Redimensiona e comprime a imagem enviada antes de guardar no banco.
     Mantém o arquivo leve (Postgres free tier tem 500MB de limite)."""
     if uploaded_file is None:
@@ -515,7 +515,7 @@ def inject_css():
         .pcard { background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
             overflow:hidden; box-shadow:var(--shadow); transition:all .18s ease; margin-bottom:10px; }
         .pcard-link:hover .pcard { border-color:var(--blue); box-shadow:0 6px 18px rgba(59,130,246,0.15); transform:translateY(-3px); }
-        .pcard .photo { height:150px; background:#f1f5f9 center/cover no-repeat;
+        .pcard .photo { aspect-ratio: 1 / 1; background:#f1f5f9 center/cover no-repeat;
             display:flex; align-items:center; justify-content:center; color:#cbd5e1;
             font-family:monospace; font-size:12px; }
         .pcard .body { padding:16px; display:flex; flex-direction:column; gap:8px; }
