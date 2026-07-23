@@ -27,6 +27,18 @@ st.set_page_config(
 # Banco local usado enquanto o Supabase não está configurado.
 SQLITE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalogo.db")
 
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo-sebem.png")
+
+
+@st.cache_data
+def logo_data_uri():
+    """Logo da Sebem embutida como data URI (evita depender de arquivo estático em runtime)."""
+    try:
+        with open(LOGO_PATH, "rb") as f:
+            return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+    except Exception:
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # Conexão com o banco — dois modos, detectados automaticamente:
@@ -388,9 +400,12 @@ def inject_css():
         section[data-testid="stSidebar"] > div { padding-top: .5rem; }
         .sb-brand { display:flex; align-items:center; gap:12px; padding: 6px 8px 4px 8px; }
         .sb-logo {
-            width:36px; height:36px; border-radius:9px; background:var(--blue);
-            display:flex; align-items:center; justify-content:center;
-            color:#fff; font-weight:800; font-size:18px; flex-shrink:0;
+            width:36px; height:36px; flex-shrink:0; object-fit:contain; display:block;
+        }
+        .sb-logo-fallback {
+            background:var(--blue); border-radius:9px; display:flex;
+            align-items:center; justify-content:center;
+            color:#fff; font-weight:800; font-size:18px;
         }
         .sb-brand .t { font-weight:800; font-size:15px; color:var(--ink); line-height:1.2; }
         .sb-brand .s { font-weight:500; font-size:12px; color:var(--muted2); line-height:1.2; }
@@ -563,10 +578,16 @@ def sidebar_nav():
         st.session_state.page = "Home"
 
     with st.sidebar:
+        logo_uri = logo_data_uri()
+        logo_html = (
+            f'<img class="sb-logo" src="{logo_uri}" alt="Sebem" />'
+            if logo_uri
+            else '<div class="sb-logo sb-logo-fallback">S</div>'
+        )
         st.markdown(
-            """
+            f"""
             <div class="sb-brand">
-              <div class="sb-logo">S</div>
+              {logo_html}
               <div>
                 <div class="t">Catálogo SAC</div>
                 <div class="s">Central de produtos</div>
