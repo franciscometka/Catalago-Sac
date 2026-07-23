@@ -8,6 +8,7 @@ CREATE TABLE produtos (
     video_url TEXT,
     manual_texto TEXT,
     foto BYTEA,
+    foto_thumb BYTEA,
     criado_em TIMESTAMP DEFAULT NOW()
 );
 

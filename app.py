@@ -112,7 +112,16 @@ def run_query(sql, params=None, fetch=True):
                 rows = cur.fetchall()
                 cols = [c.name for c in cur.description]
                 conn.commit()
-                return [dict(zip(cols, r)) for r in rows]
+                # psycopg2 devolve colunas bytea como memoryview, que não é
+                # serializável (pickle) — st.cache_data precisa disso para
+                # guardar o resultado em cache. Converte para bytes aqui.
+                return [
+                    {
+                        c: (bytes(v) if isinstance(v, memoryview) else v)
+                        for c, v in zip(cols, r)
+                    }
+                    for r in rows
+                ]
             conn.commit()
             return None
     except Exception:
@@ -134,6 +143,7 @@ def init_schema():
                 video_url TEXT,
                 manual_texto TEXT,
                 foto BLOB,
+                foto_thumb BLOB,
                 criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """,
@@ -150,11 +160,12 @@ def init_schema():
             """,
             fetch=False,
         )
-        try:
-            run_query("ALTER TABLE produtos ADD COLUMN foto BLOB;", fetch=False)
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                raise
+        for coluna in ("foto BLOB", "foto_thumb BLOB"):
+            try:
+                run_query(f"ALTER TABLE produtos ADD COLUMN {coluna};", fetch=False)
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         return
 
     run_query(
@@ -166,6 +177,7 @@ def init_schema():
             video_url TEXT,
             manual_texto TEXT,
             foto BYTEA,
+            foto_thumb BYTEA,
             criado_em TIMESTAMP DEFAULT NOW()
         );
         """,
@@ -183,6 +195,7 @@ def init_schema():
         fetch=False,
     )
     run_query("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS foto BYTEA;", fetch=False)
+    run_query("ALTER TABLE produtos ADD COLUMN IF NOT EXISTS foto_thumb BYTEA;", fetch=False)
 
 
 def processar_foto(uploaded_file, max_dim=1000, quality=85):
@@ -202,6 +215,24 @@ def processar_foto(uploaded_file, max_dim=1000, quality=85):
         return buf.getvalue()
     except Exception:
         return data  # Pillow indisponível ou formato inesperado: guarda como veio.
+
+
+def gerar_thumb(foto_full, max_dim=320, quality=70):
+    """Gera uma miniatura leve a partir da foto já processada, para os cards
+    do catálogo (evita transferir a foto em tamanho completo a cada busca)."""
+    if not foto_full:
+        return None
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(foto_full))
+        img = img.convert("RGB")
+        img.thumbnail((max_dim, max_dim))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+    except Exception:
+        return foto_full
 
 
 def foto_bytes(valor):
@@ -229,13 +260,16 @@ def erro_sku_duplicado(exc):
 # --------------------------------------------------------------------------- #
 # Acesso a dados
 # --------------------------------------------------------------------------- #
+@st.cache_data(ttl=30, show_spinner=False)
 def buscar_produtos(termo=""):
+    """Lista para o grid — traz só a miniatura (foto_thumb), não a foto completa,
+    para manter a busca rápida mesmo com muitas fotos cadastradas."""
     termo = (termo or "").strip()
     if termo:
         like = f"%{termo}%"
         return run_query(
             """
-            SELECT id, nome, sku, video_url, manual_texto, foto, criado_em
+            SELECT id, nome, sku, video_url, manual_texto, foto_thumb, criado_em
             FROM produtos
             WHERE nome ILIKE %s OR sku ILIKE %s
             ORDER BY nome
@@ -244,13 +278,23 @@ def buscar_produtos(termo=""):
         )
     return run_query(
         """
-        SELECT id, nome, sku, video_url, manual_texto, foto, criado_em
+        SELECT id, nome, sku, video_url, manual_texto, foto_thumb, criado_em
         FROM produtos
         ORDER BY nome
         """
     )
 
 
+def buscar_produto_por_id(pid):
+    """Um único produto com a foto em tamanho completo — usado só na página de detalhe."""
+    rows = run_query(
+        "SELECT id, nome, sku, video_url, manual_texto, foto, criado_em FROM produtos WHERE id = %s",
+        (pid,),
+    )
+    return rows[0] if rows else None
+
+
+@st.cache_data(ttl=30, show_spinner=False)
 def buscar_faq(produto_id):
     return run_query(
         "SELECT id, pergunta, resposta FROM faq_produto WHERE produto_id = %s ORDER BY id",
@@ -258,6 +302,7 @@ def buscar_faq(produto_id):
     )
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def get_stats():
     """Contagens reais para os stat cards da Home."""
     row = run_query(
@@ -272,15 +317,27 @@ def get_stats():
     return row[0] if row else {"produtos": 0, "videos": 0, "faqs": 0}
 
 
+def limpar_cache_produtos():
+    """Invalida os caches após qualquer escrita, para refletir a mudança na hora."""
+    buscar_produtos.clear()
+    get_stats.clear()
+
+
+def limpar_cache_faq():
+    buscar_faq.clear()
+    get_stats.clear()
+
+
 def inserir_produto(nome, sku, video_url, manual_texto, foto=None):
     run_query(
         """
-        INSERT INTO produtos (nome, sku, video_url, manual_texto, foto)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO produtos (nome, sku, video_url, manual_texto, foto, foto_thumb)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """,
-        (nome, sku or None, video_url or None, manual_texto or None, foto),
+        (nome, sku or None, video_url or None, manual_texto or None, foto, gerar_thumb(foto)),
         fetch=False,
     )
+    limpar_cache_produtos()
 
 
 def inserir_faq(produto_id, pergunta, resposta):
@@ -289,18 +346,20 @@ def inserir_faq(produto_id, pergunta, resposta):
         (produto_id, pergunta, resposta),
         fetch=False,
     )
+    limpar_cache_faq()
 
 
 def atualizar_produto(pid, nome, sku, video_url, manual_texto, foto=None):
     run_query(
         """
         UPDATE produtos
-        SET nome = %s, sku = %s, video_url = %s, manual_texto = %s, foto = %s
+        SET nome = %s, sku = %s, video_url = %s, manual_texto = %s, foto = %s, foto_thumb = %s
         WHERE id = %s
         """,
-        (nome, sku or None, video_url or None, manual_texto or None, foto, pid),
+        (nome, sku or None, video_url or None, manual_texto or None, foto, gerar_thumb(foto), pid),
         fetch=False,
     )
+    limpar_cache_produtos()
 
 
 def atualizar_faq(faq_id, pergunta, resposta):
@@ -309,10 +368,12 @@ def atualizar_faq(faq_id, pergunta, resposta):
         (pergunta, resposta, faq_id),
         fetch=False,
     )
+    limpar_cache_faq()
 
 
 def deletar_faq(faq_id):
     run_query("DELETE FROM faq_produto WHERE id = %s", (faq_id,), fetch=False)
+    limpar_cache_faq()
 
 
 # --------------------------------------------------------------------------- #
@@ -888,7 +949,7 @@ SAMPLE_PRODUCTS = [
 def produto_display(prod):
     """Mapeia um produto real do banco para os campos visuais do card."""
     manual = (prod.get("manual_texto") or "").strip()
-    foto = foto_data_uri(prod.get("foto")) or youtube_thumbnail(prod.get("video_url"))
+    foto = foto_data_uri(prod.get("foto_thumb")) or youtube_thumbnail(prod.get("video_url"))
     return {
         "href": f"?produto={prod['id']}",
         "photo": foto,
@@ -1046,11 +1107,10 @@ def page_produtos(termo):
             st.session_state.pop("sel", None)
         else:
             try:
-                produtos = buscar_produtos("")
+                prod = buscar_produto_por_id(ref)
             except Exception as e:
                 st.error(f"Erro ao consultar o banco: {e}")
                 return
-            prod = next((p for p in produtos if p["id"] == ref), None)
             if prod:
                 render_detalhe({
                     "id": prod["id"], "editable": True,

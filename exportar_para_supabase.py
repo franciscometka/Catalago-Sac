@@ -41,7 +41,7 @@ def main():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     produtos = conn.execute(
-        "SELECT id, nome, sku, video_url, manual_texto, foto FROM produtos ORDER BY id"
+        "SELECT id, nome, sku, video_url, manual_texto, foto, foto_thumb FROM produtos ORDER BY id"
     ).fetchall()
     faqs = conn.execute(
         "SELECT produto_id, pergunta, resposta FROM faq_produto ORDER BY id"
@@ -57,9 +57,10 @@ def main():
 
     for p in produtos:
         linhas.append(
-            "INSERT INTO produtos (id, nome, sku, video_url, manual_texto, foto) VALUES "
+            "INSERT INTO produtos (id, nome, sku, video_url, manual_texto, foto, foto_thumb) VALUES "
             f"({p['id']}, {esc(p['nome'])}, {esc(p['sku'])}, "
-            f"{esc(p['video_url'])}, {esc(p['manual_texto'])}, {esc_bytes(p['foto'])});"
+            f"{esc(p['video_url'])}, {esc(p['manual_texto'])}, {esc_bytes(p['foto'])}, "
+            f"{esc_bytes(p['foto_thumb'])});"
         )
 
     linhas.append("")
